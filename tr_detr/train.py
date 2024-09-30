@@ -158,7 +158,7 @@ def train(model, criterion, optimizer, lr_scheduler, train_dataset, val_dataset,
         if epoch_i > -1:
             train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i, tb_writer) 
             lr_scheduler.step()
-        eval_epoch_interval = 5
+        eval_epoch_interval = 2
         if opt.eval_path is not None and (epoch_i + 1) % eval_epoch_interval == 0:
             with torch.no_grad():
                 metrics_no_nms, metrics_nms, eval_loss_meters, latest_file_paths = \
@@ -428,6 +428,10 @@ def start_training():
 
 
 if __name__ == '__main__':
+    start = time.time()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+    
     best_ckpt_path, eval_split_name, eval_path, debug, opt = start_training()
     if not debug:
         input_args = ["--resume", best_ckpt_path,
@@ -439,4 +443,9 @@ if __name__ == '__main__':
         logger.info("\n\n\nFINISHED TRAINING!!!")
         logger.info("Evaluating model at {}".format(best_ckpt_path))
         logger.info("Input args {}".format(sys.argv[1:]))
-        start_inference(opt)
+        # start_inference(opt)
+
+    stop = time.time()
+    
+    max_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)
+    print(f"Peak memory use: {max_memory}MB - {round((stop-start)*1e6)/1e3}ms")

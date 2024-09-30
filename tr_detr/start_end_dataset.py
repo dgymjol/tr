@@ -89,7 +89,10 @@ class StartEndDataset(Dataset):
         model_inputs = dict()
         model_inputs["query_feat"] = self._get_query_feat_by_qid(meta["qid"])  # (Dq, ) or (Lq, Dq)
         if self.use_video:
-            model_inputs["video_feat"] = self._get_video_feat_by_vid(meta["vid"])  # (Lv, Dv)
+            if 'org_clip_ids_order' in meta.keys():
+                model_inputs["video_feat"] = self._get_video_crop_feat_by_vid(meta["vid"], meta["org_clip_ids_order"])  # (Lv, Dv)
+            else:
+                model_inputs["video_feat"] = self._get_video_feat_by_vid(meta["vid"])  # (Lv, Dv)
             ctx_l = len(model_inputs["video_feat"])
         else:
             ctx_l = self.max_v_l
@@ -377,6 +380,73 @@ class StartEndDataset(Dataset):
             v_feat = np.concatenate(v_feat_list, axis=1)
         return torch.from_numpy(v_feat)  # (Lv, D)
 
+
+    def _get_video_crop_feat_by_vid(self, vid, org_clip_ids_order):
+        if self.dset_name == 'tvsum':
+            v_feat_list = []
+            for _feat_dir in self.v_feat_dirs:
+                _feat_path = join(_feat_dir, f"{vid}_rgb.npy")
+                _feat_rgb = np.load(_feat_path)[:self.max_v_l].astype(np.float32)
+
+                _feat_path = join(_feat_dir, f"{vid}_opt.npy")
+                _feat_opt = np.load(_feat_path)[:self.max_v_l].astype(np.float32)
+                
+                _feat = np.concatenate([_feat_rgb, _feat_opt], axis=-1)
+                # _feat = _feat_rgb
+                if self.normalize_v:
+                    _feat = l2_normalize_np_array(_feat)
+                v_feat_list.append(_feat)
+            # some features are slightly longer than the others
+            min_len = min([len(e) for e in v_feat_list])
+            v_feat_list = [e[:min_len] for e in v_feat_list]
+            v_feat = np.concatenate(v_feat_list, axis=1)
+
+        elif self.dset_name == 'youtube_uni':
+            v_feat_list = []
+            for _feat_dir in self.v_feat_dirs:
+                # Only single npz files per directory
+                try:
+                    _feat_path = join(_feat_dir, f"{vid}.npz")
+                    _feat = np.load(_feat_path)["features"][:self.max_v_l].astype(np.float32)
+                except:
+                    _feat_path = join(_feat_dir, f"{vid}.npy")
+                    _feat = np.load(_feat_path)[:self.max_v_l].astype(np.float32)
+                
+                # _feat = _feat_rgb
+                if self.normalize_v:
+                    _feat = l2_normalize_np_array(_feat)
+                v_feat_list.append(_feat)
+            # some features are slightly longer than the others
+            min_len = min([len(e) for e in v_feat_list])
+            v_feat_list = [e[:min_len] for e in v_feat_list] # TODO do we need to cut the length over the min_len?
+            v_feat = np.concatenate(v_feat_list, axis=1)
+
+        else:
+            v_feat_list = []
+            for _feat_dir in self.v_feat_dirs:
+                try:
+                    _feat_path = join(_feat_dir, f"{vid}.npz")
+                    _feat = np.load(_feat_path)["features"][:self.max_v_l].astype(np.float32)
+                except:
+                    _feat_path = join(_feat_dir, f"{vid}.npy")
+                    _feat = np.load(_feat_path)[:self.max_v_l].astype(np.float32)
+                    
+                # relocate clips
+                _feats = []
+                for s, e in org_clip_ids_order:
+                    _feats.append(_feat[s:e].astype(np.float32))
+                _feats = np.concatenate(_feats, axis=0)
+                
+                
+                if self.normalize_v:
+                    _feat = l2_normalize_np_array(_feats)
+                v_feat_list.append(_feats)
+            # some features are slightly longer than the others
+            min_len = min([len(e) for e in v_feat_list])
+            v_feat_list = [e[:min_len] for e in v_feat_list]
+            v_feat = np.concatenate(v_feat_list, axis=1)
+
+        return torch.from_numpy(v_feat)  # (Lv, D)
 
 
 def start_end_collate(batch):

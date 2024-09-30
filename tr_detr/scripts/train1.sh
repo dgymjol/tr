@@ -51,13 +51,13 @@ label_loss_coef=4
 train_path=data/qv_duration_150.jsonl
 
 
-gpunum=0
+gpunum=1
 
 org_duration=150
 clip_len=2
 
 
-multi_num=50
+multi_num=45
 
 duration=$(expr $org_duration \* $multi_num)
 max_v_l=$(expr $duration / $clip_len)
@@ -97,7 +97,7 @@ ${@:1}
 
 
 
-multi_num=35
+multi_num=40
 
 duration=$(expr $org_duration \* $multi_num)
 max_v_l=$(expr $duration / $clip_len)
