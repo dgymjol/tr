@@ -16,6 +16,9 @@ from torch import nn, Tensor
 import math
 import numpy as np
 from .attention import MultiheadAttention
+from xformers.components.attention import LocalAttention
+from xformers.ops import memory_efficient_attention  # type: ignore
+from xformers.components.attention.attention_mask import AttentionMask
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
@@ -64,7 +67,8 @@ class Transformer(nn.Module):
                  keep_query_pos=False, query_scale_type='cond_elewise',
                  num_patterns=0,
                  modulate_t_attn=True,
-                 bbox_embed_diff_each_layer=False,
+                 bbox_embed_diff_each_layer=False, max_v_l=-1,
+                 attn=None, window_size=None, dilation=None,
                  ):
         super().__init__()
 
@@ -76,7 +80,9 @@ class Transformer(nn.Module):
 
         # TransformerEncoderLayerThin
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-                                                dropout, activation, normalize_before)
+                                                dropout, activation, normalize_before, max_v_l,
+                                                attn, window_size,dilation)
+
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
@@ -137,7 +143,7 @@ class Transformer(nn.Module):
         # *Use highlight scores to suppress feature expressions in non-highlight clips
         memory_local, saliency_scores = self.HD2MR(memory_local, saliency_proj1, src, video_length, mask_local, pos_embed_local)
 
-        tgt = torch.zeros(refpoint_embed.shape[0], bs, d).cuda()
+        tgt = torch.zeros(refpoint_embed.shape[0], bs, d, device='cuda')
         hs, references = self.decoder(tgt, memory_local, memory_key_padding_mask=mask_local,
                           pos=pos_embed_local, refpoints_unsigmoid=refpoint_embed)  # (#layers, #queries, batch_size, d)
         
@@ -583,9 +589,43 @@ class T2V_TransformerEncoderLayer(nn.Module):
 class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
+                 activation="relu", normalize_before=False, max_v_l=-1, 
+                 attn=None, window_size=None, dilation=None):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+
+        # Vanilla Attention (va)
+        # Memory Efficient Attention (mea)
+        # Sliding Window Attention (swa)
+        # Dilated Attention (da)
+        # SlowFast Attention (sfa)
+        assert attn in ['va', 'mea', 'swa', 'va_da', 'swa_da']
+
+        if 'va' in attn:
+            self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        else:
+            self.wq = nn.Linear(d_model, d_model)
+            self.wk = nn.Linear(d_model, d_model)
+            self.wv = nn.Linear(d_model, d_model)
+            self.wo = nn.Linear(d_model, d_model)
+
+            if 'swa' in attn:
+                self.self_attn = LocalAttention(dropout=dropout, 
+                                                causal=False, 
+                                                window_size=window_size, 
+                                                force_sparsity=False)
+
+            # https://github.com/fkodom/dilated-attention-pytorch
+            # if 'da' in attn:
+            #     self.self_attn = DilatedAttention(
+            #         segment_lengths=[75],
+            #         dilation_rates=[dilation],
+            #     )        
+
+        self.attn = attn
+        self.nhead = nhead
+        self.window_size = window_size
+        self.dilation = dilation
+
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
@@ -607,9 +647,71 @@ class TransformerEncoderLayer(nn.Module):
                      src_mask: Optional[Tensor] = None,
                      src_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None):
+        
+        # https://github.com/2991495215/xformers/blob/ad986981b141a218bf07bf968e920051ff2c7b41/xformers/components/attention/base.py#L40C1-L61C47
+        
         q = k = self.with_pos_embed(src, pos)
-        src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask)[0]
+        seq_len, bs, n_model = q.shape
+        
+        attn_mask = None
+        if 'da' in self.attn:
+            row = torch.arange(seq_len, device='cuda').unsqueeze(1)  # Shape: (size, 1)
+            col = torch.arange(seq_len, device='cuda').unsqueeze(0)  # Shape: (1, size)
+            # 행과 열의 절대 차이 계산
+            abs_diff = torch.abs(row - col)
+            # 마스크 생성: |i - j|가 (dilation + 1)의 배수인 경우 False, 아니면 True
+            mask = (abs_diff % (self.dilation + 1)) != 0
+
+            # 같은 크기의 float 텐서 생성
+            attention_mask = torch.empty_like(mask, dtype=torch.float)
+            # True -> -inf, False -> 0.0로 변환
+            attention_mask.masked_fill_(mask, float('-inf'))
+            attention_mask.masked_fill_(~mask, 0.0)
+
+            attn_mask = AttentionMask(attention_mask)
+            
+        if 'va' in self.attn:
+            if attn_mask is None:
+                src2 = self.self_attn(q, k, value=src, attn_mask=src_mask,
+                                    key_padding_mask=src_key_padding_mask)[0]
+            else:
+                src2 = self.self_attn(q, k, value=src, attn_mask=attention_mask,
+                                key_padding_mask=src_key_padding_mask)[0]
+        else:
+            head_dim = n_model // self.nhead
+            q_, k_, v_ = self.wq(q), self.wk(k), self.wv(src)
+
+            # xformers requires (B=1, S, H, D)
+            # (S, B, H*D) -> (S, B, H, D) _> (B, S, H, D)
+            q_ = q_.view(seq_len, bs, self.nhead, head_dim).transpose(0, 1)
+            k_ = k_.view(seq_len, bs, self.nhead, head_dim).transpose(0, 1)
+            v_ = v_.view(seq_len, bs, self.nhead, head_dim).transpose(0, 1)
+
+            if 'mea' == self.attn:
+                output = memory_efficient_attention(q_, k_, v_)
+                output = output.view(bs, seq_len, n_model).transpose(0, 1)
+                src2 = self.wo(output)
+            elif 'swa' in self.attn:
+                #  (B, S, H, D) -> (B, H, S, D) -> (B * H, S, D)
+                q_ = q_.transpose(1, 2).reshape(bs * self.nhead, seq_len, head_dim)
+                k_ = k_.transpose(1, 2).reshape(bs * self.nhead, seq_len, head_dim) 
+                v_ = v_.transpose(1, 2).reshape(bs * self.nhead, seq_len, head_dim)
+
+                if attn_mask is None:
+                    output = self.self_attn(q_, k_, v_)
+                else:
+                    output = self.self_attn(q_, k_, v_, attn_mask)
+
+                output = output.view(bs, self.nhead, seq_len, head_dim).permute(2, 0, 1, 3).contiguous().view(seq_len, bs, n_model)
+                src2 = self.wo(output)
+            else:
+                if attn_mask is None:
+                    assert False
+                else:
+                    src2 = self.self_attn(q, k, value=src, attn_mask=attention_mask,
+                                    key_padding_mask=src_key_padding_mask)[0]
+
+
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
@@ -870,6 +972,10 @@ def build_transformer(args):
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
         activation='prelu',
+        max_v_l=args.max_v_l,
+        attn=args.attn,
+        window_size=args.window_size,
+        dilation=args.dilation,
     )
 
 

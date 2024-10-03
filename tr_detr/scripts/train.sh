@@ -2,7 +2,7 @@ dset_name=hl
 ctx_mode=video_tef
 v_feat_types=slowfast_clip
 t_feat_type=clip 
-results_root=test
+results_root=results_attn
 exp_id=exp
 
 ######## data paths
@@ -39,7 +39,7 @@ fi
 bsz=8
 lr_drop=400
 lr=0.0001
-n_epoch=2
+n_epoch=200
 lw_saliency=1.0
 seed=2017
 VTC_loss_coef=0.3
@@ -48,26 +48,22 @@ CTC_loss_coef=0.5
 label_loss_coef=4
 
 
-train_path=data/qv_duration_150.jsonl
 
 
-gpunum=0
-
-org_duration=150
-clip_len=2
+gpunum=1
 
 
-multi_num=50
+list="2025 2024 2023 2022 2021"
 
-duration=$(expr $org_duration \* $multi_num)
-max_v_l=$(expr $duration / $clip_len)
+for seed in $list
+do
+  echo $seed
 
-echo "multi_num : $multi_num"
-echo "duration : $duration"
-echo "max_v_l : $max_v_l"
+attn=swa
+window_size=3
+dilation=3
 
-train_path=data/qv_${multi_num}.jsonl
-exp_id=org_duration_${duration}
+exp_id=${attn}_ws_${window_size}_d_${dilation}_seed_${seed}
 
 CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py \
 --seed $seed \
@@ -90,24 +86,17 @@ CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py 
 --n_epoch ${n_epoch} \
 --lw_saliency ${lw_saliency} \
 --lr_drop ${lr_drop} \
---max_v_l ${max_v_l} \
+--attn ${attn} \
+--window_size ${window_size} \
+--dilation ${dilation} \
 >> ${results_root}/${exp_id}_log.txt
-${@:1}
 
 
+attn=swa
+window_size=9
+dilation=3
 
-
-multi_num=35
-
-duration=$(expr $org_duration \* $multi_num)
-max_v_l=$(expr $duration / $clip_len)
-
-echo "multi_num : $multi_num"
-echo "duration : $duration"
-echo "max_v_l : $max_v_l"
-
-train_path=data/qv_${multi_num}.jsonl
-exp_id=org_duration_${duration}
+exp_id=${attn}_ws_${window_size}_d_${dilation}_seed_${seed}
 
 CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py \
 --seed $seed \
@@ -130,7 +119,10 @@ CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py 
 --n_epoch ${n_epoch} \
 --lw_saliency ${lw_saliency} \
 --lr_drop ${lr_drop} \
---max_v_l ${max_v_l} \
+--attn ${attn} \
+--window_size ${window_size} \
+--dilation ${dilation} \
 >> ${results_root}/${exp_id}_log.txt
-${@:1}
+
+done
 

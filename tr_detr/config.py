@@ -150,6 +150,11 @@ class BaseOptions(object):
         # my_loss_config
         parser.add_argument('--VTC_loss_coef', default=1, type=float)
         parser.add_argument('--CTC_loss_coef', default=1, type=float)
+
+        parser.add_argument("--attn", type=str, default=None)
+        parser.add_argument("--window_size", type=int, default=None)
+        parser.add_argument("--dilation", type=int, default=None)
+        
         self.parser = parser
 
     def display_save(self, opt):

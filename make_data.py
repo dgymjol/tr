@@ -12,7 +12,7 @@ np.random.seed(seed)
 org_datalist = load_jsonl('data/highlight_train_release.jsonl')
 clip_len = 2
 
-mult_times = 50
+mult_times = 5
 
 # org_datalist = load_jsonl('data/tacos/train.jsonl')
 # clip_len = 2
