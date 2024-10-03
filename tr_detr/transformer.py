@@ -69,6 +69,7 @@ class Transformer(nn.Module):
                  modulate_t_attn=True,
                  bbox_embed_diff_each_layer=False, max_v_l=-1,
                  attn=None, window_size=None, dilation=None,
+                 f_model=512, s_window_size=None, f_window_size=None, f_dilation=None, sf_fuse=None
                  ):
         super().__init__()
 
@@ -77,14 +78,30 @@ class Transformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_encoder_layers, encoder_norm)
 
+        if attn == 'safa':
+            # TransformerEncoderLayerThin
+            s_encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                    dropout, activation, normalize_before, max_v_l,
+                                                    attn='swa', window_size=s_window_size, dilation=dilation)
+            f_encoder_layer = TransformerEncoderLayer(f_model, nhead, dim_feedforward,
+                                                    dropout, activation, normalize_before, max_v_l,
+                                                    attn='swa_da', window_size=f_window_size, dilation=f_dilation)
+            
+            s_encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+            f_encoder_norm = nn.LayerNorm(f_model) if normalize_before else None
+            self.encoder = SFTransformerEncoder(s_encoder_layer, f_encoder_layer, 
+                                                num_encoder_layers, s_encoder_norm, f_encoder_norm, 
+                                                s_model=d_model, f_model=f_model, sf_fuse=sf_fuse,)
+  
+        else:
+            # TransformerEncoderLayerThin
+            encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                    dropout, activation, normalize_before, max_v_l,
+                                                    attn, window_size, dilation,
+                                                    s_window_size, f_window_size, f_dilation)
 
-        # TransformerEncoderLayerThin
-        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-                                                dropout, activation, normalize_before, max_v_l,
-                                                attn, window_size,dilation)
-
-        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+            encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+            self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
         # TransformerDecoderLayerThin
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
@@ -590,15 +607,18 @@ class TransformerEncoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False, max_v_l=-1, 
-                 attn=None, window_size=None, dilation=None):
+                 attn=None, window_size=None, dilation=None,
+                 s_window_size=None, f_window_size=None, f_dilation=None):
         super().__init__()
 
         # Vanilla Attention (va)
         # Memory Efficient Attention (mea)
         # Sliding Window Attention (swa)
         # Dilated Attention (da)
-        # SlowFast Attention (sfa)
-        assert attn in ['va', 'mea', 'swa', 'va_da', 'swa_da']
+        # SlowFast Attention (sfa) : swa_da + swa
+        # Slow Attention & Fast Attention (safa) : slow(swa) & fast(swa_da) 
+        
+        assert attn in ['va', 'mea', 'swa', 'va_da', 'swa_da', 'sfa']
 
         if 'va' in attn:
             self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
@@ -613,18 +633,19 @@ class TransformerEncoderLayer(nn.Module):
                                                 causal=False, 
                                                 window_size=window_size, 
                                                 force_sparsity=False)
-
-            # https://github.com/fkodom/dilated-attention-pytorch
-            # if 'da' in attn:
-            #     self.self_attn = DilatedAttention(
-            #         segment_lengths=[75],
-            #         dilation_rates=[dilation],
-            #     )        
-
+            elif attn == 'sfa':
+                self.self_attn = LocalAttention(dropout=dropout, 
+                                                causal=False, 
+                                                window_size=f_window_size, 
+                                                force_sparsity=False)
         self.attn = attn
         self.nhead = nhead
         self.window_size = window_size
         self.dilation = dilation
+
+        self.s_window_size = s_window_size
+        self.f_window_size = f_window_size
+        self.f_dilation = f_dilation
 
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -655,10 +676,11 @@ class TransformerEncoderLayer(nn.Module):
         
         attn_mask = None
         if 'da' in self.attn:
-            row = torch.arange(seq_len, device='cuda').unsqueeze(1)  # Shape: (size, 1)
-            col = torch.arange(seq_len, device='cuda').unsqueeze(0)  # Shape: (1, size)
-            # 행과 열의 절대 차이 계산
-            abs_diff = torch.abs(row - col)
+            # 인덱스 행렬 생성
+            indices = torch.arange(seq_len, device='cuda').unsqueeze(1)  # 크기: (size, 1)
+            # 절대 차이 계산
+            abs_diff = torch.abs(indices - indices.t())  # 크기: (size, size)
+            
             # 마스크 생성: |i - j|가 (dilation + 1)의 배수인 경우 False, 아니면 True
             mask = (abs_diff % (self.dilation + 1)) != 0
 
@@ -669,6 +691,32 @@ class TransformerEncoderLayer(nn.Module):
             attention_mask.masked_fill_(~mask, 0.0)
 
             attn_mask = AttentionMask(attention_mask)
+            
+        elif 'sfa' == self.attn:
+            # dilated mask
+
+            window_half = self.s_window_size // 2
+            # 인덱스 행렬 생성
+            indices = torch.arange(seq_len, device='cuda').unsqueeze(1)  # 크기: (size, 1)
+            # 절대 차이 계산
+            abs_diff = torch.abs(indices - indices.t())  # 크기: (size, size)
+            
+            # Dilation 적용: |i-j| % (dilation +1) !=0
+            dilation_condition = (abs_diff % (self.f_dilation + 1)) != 0
+            
+            # Window Size 적용: |i-j| > window_half
+            window_condition = abs_diff > window_half
+            
+            # 두 조건을 모두 만족해야 True, 아니면 False
+            mask = dilation_condition & window_condition  # True: 마스킹, False: 비마스킹
+    
+            # 같은 크기의 float 텐서 생성
+            attention_mask = torch.empty_like(mask, dtype=torch.float)
+            # True -> -inf, False -> 0.0로 변환
+            attention_mask.masked_fill_(mask, float('-inf'))
+            attention_mask.masked_fill_(~mask, 0.0)
+
+            attn_mask = AttentionMask(attention_mask)       
             
         if 'va' in self.attn:
             if attn_mask is None:
@@ -691,7 +739,7 @@ class TransformerEncoderLayer(nn.Module):
                 output = memory_efficient_attention(q_, k_, v_)
                 output = output.view(bs, seq_len, n_model).transpose(0, 1)
                 src2 = self.wo(output)
-            elif 'swa' in self.attn:
+            elif 'swa' in self.attn or 'sfa' == self.attn:
                 #  (B, S, H, D) -> (B, H, S, D) -> (B * H, S, D)
                 q_ = q_.transpose(1, 2).reshape(bs * self.nhead, seq_len, head_dim)
                 k_ = k_.transpose(1, 2).reshape(bs * self.nhead, seq_len, head_dim) 
@@ -710,7 +758,6 @@ class TransformerEncoderLayer(nn.Module):
                 else:
                     src2 = self.self_attn(q, k, value=src, attn_mask=attention_mask,
                                     key_padding_mask=src_key_padding_mask)[0]
-
 
         src = src + self.dropout1(src2)
         src = self.norm1(src)
@@ -741,6 +788,78 @@ class TransformerEncoderLayer(nn.Module):
             return self.forward_pre(src, src_mask, src_key_padding_mask, pos)
         return self.forward_post(src, src_mask, src_key_padding_mask, pos)
 
+
+
+class SFTransformerEncoder(nn.Module):
+
+    def __init__(self, s_encoder_layer, f_encoder_layer, num_layers, s_norm=None, f_norm=None, return_intermediate=False, 
+                 s_model=512, f_model=512, sf_fuse=None):
+        super().__init__()
+        self.s_layers = _get_clones(s_encoder_layer, num_layers)
+        self.f_layers = _get_clones(f_encoder_layer, num_layers)
+        self.num_layers = num_layers
+        self.s_norm = s_norm
+        self.f_norm = f_norm
+        self.return_intermediate = return_intermediate
+        self.sf_same_dim = (s_model == f_model)
+        
+        self.sf_fuse = sf_fuse
+        assert sf_fuse in ['sum','concat']
+
+        if s_model != f_model:
+            self.s2f=MLP(s_model, s_model, f_model, 3)
+            if sf_fuse == 'sum':
+                self.f2s=MLP(f_model, f_model, s_model, 3)
+                
+        if sf_fuse == 'concat':
+            self.sf2s=MLP(s_model + f_model, s_model + f_model, s_model, 3)
+        elif sf_fuse == 'sum':
+            self.s2s=MLP(s_model, s_model, s_model, 3)
+                
+    # for tvsum, add kwargs
+    def forward(self, src,
+                mask: Optional[Tensor] = None,
+                src_key_padding_mask: Optional[Tensor] = None,
+                pos: Optional[Tensor] = None,
+                **kwargs):
+        output = src
+
+        # split slow / fast
+        s_output = output
+        if self.sf_same_dim:
+            f_output = output
+            f_pos = pos
+        else:
+            f_output = self.s2f(output)
+            f_pos = self.s2f(pos)
+        
+        # encoding
+        for s_layer in self.s_layers:
+            s_output = s_layer(s_output, src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask, pos=pos, **kwargs)
+        if self.s_norm is not None:
+            s_output = self.norm(s_output)
+            
+            
+        for f_layer in self.f_layers:
+            f_output = f_layer(f_output, src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask, pos=f_pos, **kwargs)
+        if self.f_norm is not None:
+            f_output = self.norm(f_output)
+            
+        # fuse slow / fast
+        if self.sf_fuse == 'concat':
+            output = torch.concat([s_output, f_output], dim=-1)
+            output = self.sf2s(output)
+        elif self.sf_fuse == 'sum':
+            if not self.sf_same_dim:
+                f_output = self.f2s(f_output)
+            output = s_output + f_output
+            output = self.s2s(output)
+        else:
+            assert False
+        
+        return output
 
 class TransformerDecoderLayer(nn.Module):
 
@@ -976,6 +1095,11 @@ def build_transformer(args):
         attn=args.attn,
         window_size=args.window_size,
         dilation=args.dilation,
+        f_model=args.f_model, 
+        s_window_size=args.s_window_size, 
+        f_window_size=args.f_window_size, 
+        f_dilation=args.f_dilation,
+        sf_fuse=args.sf_fuse,
     )
 
 
