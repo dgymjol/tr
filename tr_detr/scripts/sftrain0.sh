@@ -36,7 +36,7 @@ else
 fi
 
 #### training
-bsz=8
+bsz=32
 lr_drop=400
 lr=0.0001
 n_epoch=200
@@ -48,28 +48,24 @@ CTC_loss_coef=0.5
 label_loss_coef=4
 
 
-gpunum=0
+gpunum=1
 
 
-results_root=results_sfa
+results_root=results_
 
 if [ ! -d $results_root ]; then
   mkdir -p $results_root
 fi
 
-list="2025 2024 2023 2022 2021"
+list="2025 2025 2023 2022 2021"
 
 for seed in $list
 do
   echo $seed
 
-attn=sfa
-s_window_size=3
-f_window_size=13
-f_dilation=2
-
-exp_id=ws_${s_window_size}_${f_window_size}_d_${f_dilation}_seed_${seed}
-
+attn=va
+tome_r=5
+exp_id=tome_${tome_r}_seed_${seed}
 CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py \
 --seed $seed \
 --label_loss_coef $label_loss_coef \
@@ -92,9 +88,38 @@ CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py 
 --lw_saliency ${lw_saliency} \
 --lr_drop ${lr_drop} \
 --attn ${attn} \
---s_window_size ${s_window_size} \
---f_window_size ${f_window_size} \
---f_dilation ${f_dilation} \
+--tome \
+--tome_r ${tome_r} \
+>> ${results_root}/${exp_id}_log.txt
+
+
+attn=va
+tome_r=15
+exp_id=tome_${tome_r}_seed_${seed}
+CUDA_VISIBLE_DEVICES=${gpunum} PYTHONPATH=$PYTHONPATH:. python tr_detr/train.py \
+--seed $seed \
+--label_loss_coef $label_loss_coef \
+--VTC_loss_coef $VTC_loss_coef \
+--CTC_loss_coef $CTC_loss_coef \
+--dset_name ${dset_name} \
+--ctx_mode ${ctx_mode} \
+--train_path ${train_path} \
+--eval_path ${eval_path} \
+--eval_split_name ${eval_split_name} \
+--v_feat_dirs ${v_feat_dirs[@]} \
+--v_feat_dim ${v_feat_dim} \
+--t_feat_dir ${t_feat_dir} \
+--t_feat_dim ${t_feat_dim} \
+--bsz ${bsz} \
+--results_root ${results_root} \
+--exp_id ${exp_id} \
+--lr ${lr} \
+--n_epoch ${n_epoch} \
+--lw_saliency ${lw_saliency} \
+--lr_drop ${lr_drop} \
+--attn ${attn} \
+--tome \
+--tome_r ${tome_r} \
 >> ${results_root}/${exp_id}_log.txt
 
 done

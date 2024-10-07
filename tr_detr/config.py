@@ -161,6 +161,10 @@ class BaseOptions(object):
         parser.add_argument("--f_dilation", type=int, default=None)
         parser.add_argument("--sf_fuse", type=str, default=None)
         
+        parser.add_argument("--tome", action='store_true')
+        parser.add_argument("--tome_cross", action='store_true')
+        parser.add_argument("--tome_r", type=int, default=None)
+        parser.add_argument("--tome_pool", action='store_true')
         
         self.parser = parser
 

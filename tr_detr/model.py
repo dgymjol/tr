@@ -154,7 +154,7 @@ class TRDETR(nn.Module):
 
         video_length = src_vid.shape[1]
         
-        hs, reference, memory, saliency_scores = self.transformer(src, ~mask, self.query_embed.weight, pos,self.saliency_proj1, video_length=video_length)
+        hs, reference, memory, saliency_scores = self.transformer(src, ~mask, self.query_embed.weight, pos, self.saliency_proj1, video_length=video_length)
         outputs_class = self.class_embed(hs)  # (#layers, batch_size, #queries, #classes)
         reference_before_sigmoid = inverse_sigmoid(reference)
         tmp = self.span_embed(hs)
@@ -164,36 +164,19 @@ class TRDETR(nn.Module):
         out = {'pred_logits': outputs_class[-1], 'pred_spans': outputs_coord[-1]}
 
         # *Refine the highlight score prediction process using the retrieved moments from moment retrieval
-        saliency_scores_refined = self.MR2HD(out, memory, video_length, src_vid_ed)
-        
-        txt_mem = memory[:, src_vid.shape[1]:]  # (bsz, L_txt, d)
-        vid_mem = memory[:, :src_vid.shape[1]]  # (bsz, L_vid, d)
-        if self.contrastive_align_loss:
-            proj_queries = F.normalize(self.contrastive_align_projection_query(hs), p=2, dim=-1)
-            proj_txt_mem = F.normalize(self.contrastive_align_projection_txt(txt_mem), p=2, dim=-1)
-            proj_vid_mem = F.normalize(self.contrastive_align_projection_vid(vid_mem), p=2, dim=-1)
-            out.update(dict(
-                proj_queries=proj_queries[-1],
-                proj_txt_mem=proj_txt_mem,
-                proj_vid_mem=proj_vid_mem
-            ))
-            
+        # saliency_scores_refined = self.MR2HD(out, memory, video_length, src_vid_ed)    
             
         # !!! this is code for test
         if src_txt.shape[1] == 0:
             print("There is zero text query. You should change codes properly")
             exit(-1)
-        out["saliency_scores"] = saliency_scores_refined
+        out["saliency_scores"] = saliency_scores
         # print(src_vid_mask.shape, src_vid.shape, vid_mem_neg.shape, vid_mem.shape)
         out["video_mask"] = src_vid_mask
         if self.aux_loss:
             # assert proj_queries and proj_txt_mem
             out['aux_outputs'] = [
                 {'pred_logits': a, 'pred_spans': b} for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
-            if self.contrastive_align_loss:
-                assert proj_queries is not None
-                for idx, d in enumerate(proj_queries[:-1]):
-                    out['aux_outputs'][idx].update(dict(proj_queries=d, proj_txt_mem=proj_txt_mem))
 
         out['src_txt_ed'] = src_txt_ed
         out['src_vid_ed'] = src_vid_ed
@@ -202,49 +185,49 @@ class TRDETR(nn.Module):
         
         return out
     
-    def MR2HD(self, out, memory, video_length, src_vid_ed):
-        prob = F.softmax(out["pred_logits"], -1) 
-        scores = prob[..., 0] 
-        sorted_scores, sorted_indices = torch.sort(scores, dim=-1, descending=True)
-        sorted_indices_max  = sorted_indices[:,:1] 
+    # def MR2HD(self, out, memory, video_length, src_vid_ed):
+    #     prob = F.softmax(out["pred_logits"], -1) 
+    #     scores = prob[..., 0] 
+    #     sorted_scores, sorted_indices = torch.sort(scores, dim=-1, descending=True)
+    #     sorted_indices_max  = sorted_indices[:,:1] 
 
 
-        pred_spans = out['pred_spans']
-        spans = span_cxw_to_xx(pred_spans) * (video_length * self.clip_len) 
-        spans = torch.floor(spans / self.clip_len) 
+    #     pred_spans = out['pred_spans']
+    #     spans = span_cxw_to_xx(pred_spans) * (video_length * self.clip_len) 
+    #     spans = torch.floor(spans / self.clip_len) 
 
-        selected_values_max = spans[torch.arange(spans.size(0)).unsqueeze(1), sorted_indices_max].squeeze(1)
-
-
-        sliced_samples = []
-        b = memory.size(0)
-        max_time = memory.size(1)
+    #     selected_values_max = spans[torch.arange(spans.size(0)).unsqueeze(1), sorted_indices_max].squeeze(1)
 
 
-        fixed_slice_size = max_time
-
-        for i in range(b):
-            start_time = int(selected_values_max[i, 0])
-            end_time = int(selected_values_max[i, 1])
-            sliced_sample = src_vid_ed[i, start_time:end_time + 1, :]
-
-            padding_size = fixed_slice_size - sliced_sample.size(0)
-            if padding_size > 0:
-                padded_slice = F.pad(sliced_sample, (0, 0, 0, padding_size), value=0)
-            else:
-                padded_slice = sliced_sample[:fixed_slice_size, :]
-
-            sliced_samples.append(padded_slice)
+    #     sliced_samples = []
+    #     b = memory.size(0)
+    #     max_time = memory.size(1)
 
 
-        sliced_features = torch.stack(sliced_samples, dim=0) # orch.Size([32, 75, 256])
-        mask = (sliced_features != 0.0) 
-        sliced_features_global_expanded = self.gru_extractor(sliced_features).unsqueeze(1) # orch.Size([32, 256])
-        cosine_similarity_matrix = torch.matmul(sliced_features_global_expanded, src_vid_ed.transpose(1, 2)).squeeze(1)  # shape: (32, 1, 75)
-        weight = cosine_similarity_matrix
-        memory = memory*weight.unsqueeze(-1)  +  memory 
-        saliency_scores = (torch.sum(self.saliency_proj1(memory), dim=-1) / np.sqrt(self.hidden_dim)) 
-        return saliency_scores
+    #     fixed_slice_size = max_time
+
+    #     for i in range(b):
+    #         start_time = int(selected_values_max[i, 0])
+    #         end_time = int(selected_values_max[i, 1])
+    #         sliced_sample = src_vid_ed[i, start_time:end_time + 1, :]
+
+    #         padding_size = fixed_slice_size - sliced_sample.size(0)
+    #         if padding_size > 0:
+    #             padded_slice = F.pad(sliced_sample, (0, 0, 0, padding_size), value=0)
+    #         else:
+    #             padded_slice = sliced_sample[:fixed_slice_size, :]
+
+    #         sliced_samples.append(padded_slice)
+
+
+    #     sliced_features = torch.stack(sliced_samples, dim=0) # orch.Size([32, 75, 256])
+    #     mask = (sliced_features != 0.0) 
+    #     sliced_features_global_expanded = self.gru_extractor(sliced_features).unsqueeze(1) # orch.Size([32, 256])
+    #     cosine_similarity_matrix = torch.matmul(sliced_features_global_expanded, src_vid_ed.transpose(1, 2)).squeeze(1)  # shape: (32, 1, 75)
+    #     weight = cosine_similarity_matrix
+    #     memory = memory*weight.unsqueeze(-1)  +  memory 
+    #     saliency_scores = (torch.sum(self.saliency_proj1(memory), dim=-1) / np.sqrt(self.hidden_dim)) 
+    #     return saliency_scores
 
 
 
