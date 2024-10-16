@@ -58,10 +58,13 @@ class PositionEmbeddingSine(nn.Module):
 
         """
         assert mask is not None
+        torch.use_deterministic_algorithms(False)
+
         x_embed = mask.cumsum(1, dtype=torch.float32)  # (bsz, L)
         if self.normalize:
             eps = 1e-6
             x_embed = x_embed / (x_embed[:, -1:] + eps) * self.scale
+        torch.use_deterministic_algorithms(True)
 
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
         dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)

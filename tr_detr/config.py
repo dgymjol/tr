@@ -155,16 +155,18 @@ class BaseOptions(object):
         parser.add_argument("--window_size", type=int, default=None)
         parser.add_argument("--dilation", type=int, default=None)
         
-        parser.add_argument("--f_model", type=int, default=None)
         parser.add_argument("--s_window_size", type=int, default=None)
         parser.add_argument("--f_window_size", type=int, default=None)
         parser.add_argument("--f_dilation", type=int, default=None)
-        parser.add_argument("--sf_fuse", type=str, default=None)
         
         parser.add_argument("--tome", action='store_true')
         parser.add_argument("--tome_cross", action='store_true')
         parser.add_argument("--tome_r", type=int, default=None)
         parser.add_argument("--tome_pool", action='store_true')
+        
+        parser.add_argument("--unmerge", action='store_true')
+        parser.add_argument("--unmerge_method", type=str, default=None)
+        
         
         self.parser = parser
 

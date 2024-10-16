@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from timm.models.vision_transformer import Attention, Block, VisionTransformer
+# from timm.models.vision_transformer import Attention, Block, VisionTransformer
 # https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py
 
 from typing import Tuple
@@ -75,44 +75,44 @@ class ToMeSelfAttention(nn.Module):
         # Return k as well here
         return x, k.mean(1)
 
-class ToMeCrossAttention(Attention):
-    """
-    Modifications:
-     - Apply proportional attention
-     - Return the mean of k over heads from attention
-    """
+# class ToMeCrossAttention(Attention):
+#     """
+#     Modifications:
+#      - Apply proportional attention
+#      - Return the mean of k over heads from attention
+#     """
 
-    def forward(
-        self, x: torch.Tensor, size: torch.Tensor = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
-        B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
+#     def forward(
+#         self, x: torch.Tensor, size: torch.Tensor = None
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
+#         B, N, C = x.shape
+#         qkv = (
+#             self.qkv(x)
+#             .reshape(B, N, 3, self.num_heads, C // self.num_heads)
+#             .permute(2, 0, 3, 1, 4)
+#         )
+#         q, k, v = (
+#             qkv[0],
+#             qkv[1],
+#             qkv[2],
+#         )  # make torchscript happy (cannot use tensor as tuple)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+#         attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        # Apply proportional attention
-        if size is not None:
-            attn = attn + size.log()[:, None, None, :, 0]
+#         # Apply proportional attention
+#         if size is not None:
+#             attn = attn + size.log()[:, None, None, :, 0]
 
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
+#         attn = attn.softmax(dim=-1)
+#         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+#         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+#         x = self.proj(x)
+#         x = self.proj_drop(x)
 
-        # Return k as well here
-        return x, k.mean(1)
+#         # Return k as well here
+#         return x, k.mean(1)
 
 # # https://github.com/facebookresearch/ToMe/blob/main/tome/patch/timm.py
 # class ToMeBlock(Block):
@@ -214,7 +214,7 @@ def _adjacent_merge(x: torch.Tensor,
     
     t = x.shape[1]
     src, dst = x[..., ::2, :], x[..., 1::2, :]
-    n, t1, c = src.shape
+    n, t1, c = src.shape #(bs, seq_len, dim)
 
     if x.dtype != torch.bool:
         unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))

@@ -35,8 +35,14 @@ def set_seed(seed, use_cuda=True):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
     if use_cuda:
+        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
 
 
 def train_epoch(model, criterion, train_loader, optimizer, opt, epoch_i, tb_writer):
@@ -414,7 +420,7 @@ def start_training():
         eval_dataset = None
 
     model, criterion, optimizer, lr_scheduler = setup_model(opt)
-    logger.info(f"Model {model}")
+    # logger.info(f"Model {model}")
     count_parameters(model)
     logger.info("Start Training...")
     
@@ -428,6 +434,7 @@ def start_training():
 
 
 if __name__ == '__main__':
+
     start = time.time()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()

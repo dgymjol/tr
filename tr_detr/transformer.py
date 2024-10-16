@@ -71,7 +71,7 @@ class Transformer(nn.Module):
                  bbox_embed_diff_each_layer=False, max_v_l=-1,
                  attn=None, window_size=None, dilation=None,
                  f_model=512, s_window_size=None, f_window_size=None, f_dilation=None, sf_fuse=None,
-                 tome=False, tome_cross=False, tome_r=0, tome_pool=False,
+                 tome=False, tome_cross=False, tome_r=0, tome_pool=False, unmerge=False,
                  ):
         super().__init__()
 
@@ -82,24 +82,30 @@ class Transformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.t2v_encoder = TransformerEncoder(t2v_encoder_layer, num_encoder_layers, encoder_norm)
 
+        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+                                                dropout, activation, normalize_before, max_v_l,
+                                                attn, window_size, dilation,
+                                                s_window_size, f_window_size, f_dilation)
 
+        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+            
         if tome:
-            encoder_layer = TransformerEncoderLayer_TOME(d_model, nhead, dim_feedforward,
+            hd2mr_encoder_layer = TransformerEncoderLayer_TOME(d_model, nhead, dim_feedforward,
                                                     dropout, activation, normalize_before, r=tome_r)
 
-            encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-            fc_norm = nn.LayerNorm(d_model) if tome_pool else None
-            self.encoder = TransformerEncoder_TOME(encoder_layer, num_encoder_layers, encoder_norm,
-                                                    tome_pool=tome_pool, fc_norm=fc_norm)
+            hd2mr_encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+            self.hd2mr_encoder = TransformerEncoder_TOME(hd2mr_encoder_layer, num_encoder_layers, hd2mr_encoder_norm,
+                                                    tome_pool=tome_pool)
             
         else:
-            encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+            hd2mr_encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
                                                     dropout, activation, normalize_before, max_v_l,
                                                     attn, window_size, dilation,
                                                     s_window_size, f_window_size, f_dilation)
 
-            encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-            self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+            hd2mr_encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+            self.hd2mr_encoder = TransformerEncoder(hd2mr_encoder_layer, num_encoder_layers, hd2mr_encoder_norm)
 
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
@@ -118,6 +124,7 @@ class Transformer(nn.Module):
         self.num_queries = num_queries
         self.num_patterns = num_patterns
         self.tome = tome
+        self.unmerge = unmerge
         
     def _reset_parameters(self):
         for p in self.parameters():
@@ -154,11 +161,19 @@ class Transformer(nn.Module):
         mask_local = mask[:, :]
         
         # *Use highlight scores to suppress feature expressions in non-highlight clips
-        memory_local, saliency_scores, pos_embed_, mask_ = self.HD2MR(memory_local, saliency_proj1, src, video_length, mask_local, pos_embed_local)
+        memory_local, saliency_scores, pos_embed_, mask_, size = self.HD2MR(memory_local, saliency_proj1, src, video_length, mask_local, pos_embed_local)
 
-        pos_embed_local = pos_embed_[:]
-        mask_local = mask_[:, :]
-        
+        if self.unmerge:
+            size_ = size.squeeze(-1)
+            seqlen, bs, dim = memory.shape
+            idx = torch.stack([torch.repeat_interleave(torch.arange(size_.size(1), device='cuda'), size_[b].to(torch.int64)) for b in range(size_.size(0))])
+            
+            memory_local = torch.gather(memory_local.transpose(0, 1), 1, idx.unsqueeze(-1).repeat(1, 1, dim)).transpose(0, 1)
+            
+        else:
+            pos_embed_local = pos_embed_[:]
+            mask_local = mask_[:, :]
+            
         tgt = torch.zeros(refpoint_embed.shape[0], bs, d, device='cuda')
         hs, references = self.decoder(tgt, memory_local, memory_key_padding_mask=mask_local,
                           pos=pos_embed_local, refpoints_unsigmoid=refpoint_embed)  # (#layers, #queries, batch_size, d)
@@ -175,8 +190,10 @@ class Transformer(nn.Module):
         src_vid = src[:video_length]
         src_vid_wg = src_vid * weight.transpose(1, 0).unsqueeze(-1)
         memory_local = memory_local + src_vid_wg 
-        memory_local, pos, src_key_padding_mask  = self.encoder(memory_local, src_key_padding_mask=mask_local, pos=pos_embed_local, return_all=True) 
-        return memory_local, saliency_scores, pos, src_key_padding_mask
+        memory_local, size, pos, src_key_padding_mask  = self.hd2mr_encoder(memory_local, src_key_padding_mask=mask_local, pos=pos_embed_local, return_all=True)
+        self.hd2mr_encoder.tome_size = None
+        
+        return memory_local, saliency_scores, pos, src_key_padding_mask, size
 
 
 class TransformerEncoder(nn.Module):
@@ -300,8 +317,7 @@ class TransformerEncoder_TOME(nn.Module):
             return torch.stack(intermediate)
         
         self.tome_size = None
-        
-        return output, pos, src_key_padding_mask
+        return output, size, pos, src_key_padding_mask
 
     def forward(self, src,
                 mask: Optional[Tensor] = None,
@@ -1037,15 +1053,14 @@ def build_transformer(args):
         attn=args.attn,
         window_size=args.window_size,
         dilation=args.dilation,
-        f_model=args.f_model, 
         s_window_size=args.s_window_size, 
         f_window_size=args.f_window_size, 
         f_dilation=args.f_dilation,
-        sf_fuse=args.sf_fuse,
         tome=args.tome,
         tome_cross=args.tome_cross,
         tome_r=args.tome_r,
         tome_pool=args.tome_pool,
+        unmerge=args.unmerge,
     )
 
 
@@ -1061,4 +1076,3 @@ def _get_activation_fn(activation):
         return nn.PReLU()
     if activation == "selu":
         return F.selu
-    raise RuntimeError(F"activation should be relu/gelu, not {activation}.")
